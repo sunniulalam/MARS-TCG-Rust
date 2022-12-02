@@ -1,2 +1,3 @@
-# MARS-TCG-Rust
-MARS TCG migrated from C to Rust
+Run tests through lib.rs
+
+lib.rs currently contains SHA2 and SHE implementations.

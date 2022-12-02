@@ -1,0 +1,48 @@
+[package]
+name = "MARS_in_Rust"
+version = "0.1.0"
+edition = "2022"
+
+[dependencies]
+anyhow = "*"
+sha2 = "*"
+aes= "*"
+hex-literal= "*"
+block-modes= "*"
+macs= "*"
+tink-core="*"
+hex= "*"
+ecb= "*"
+libc= "0.2.135"
+cipher= "*"
+cmac= "*"
+substring= "*"
+slice= "0.0.4"
+bytes= "*"
+hmac="*"
+digest="*"
+byte-strings= "*"
+ascon-aead="*"
+ascon-hash="*"
+
+[dev-dependencies]
+criterion = "*"
+
+[lib]
+name = "lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bin"
+path = "src/main.rs"
+
+[[bench]]
+name = "bench"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+#debug = true
+
