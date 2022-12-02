@@ -1,66 +1,77 @@
 /*SHE*/
 use aes::Aes128;
-use aes::cipher::{BlockCipher, BlockEncrypt, BlockDecrypt, };
 use hex_literal::hex;
-use hex::decode_to_slice;
-use cmac::{Cmac, Mac, digest::{typenum::{UInt, UTerm, B1, B0}, OutputSizeUser}};
+use cmac::{Cmac, Mac, digest::{generic_array::GenericArray, typenum::{UInt, UTerm, B1, B0}, OutputSizeUser}};
 use bytes::{BytesMut, BufMut};
-use cipher::generic_array::GenericArray;
-use std::{vec, fmt::Write, num::ParseIntError};
-
-//hex!(stringName); //result will be bytes
+use std::vec::IntoIter;
 
 #[derive(Debug, Default)]
 pub struct she_hctx_t{
-    total:  usize,
-    len:    usize,
-    blk:    GenericArray<u8, UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>>,
-    h:      GenericArray<u8, UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>>,
-    truncate: usize,
+    total: usize,
+    len: usize,
+    blk: Vec<u8>,
+    h: GenericArray<u8, UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>>,
 }
 
-pub(crate) type profile_shc_t= she_hctx_t;
+type profile_shc_t= she_hctx_t;
+
 
 impl she_hctx_t{
-    fn SHEHashInit(&mut self){
-        (self.h).fill(0x00);
+
+    fn SHE_Init(&mut self){
+        (self.h).fill(0x0);
         (self.total)= 0;
         (self.len)= 0;
-        (self.blk)= GenericArray::default();
-        (self.truncate)= 16;
+        (self.blk)= vec![0;32];
     }  
-    fn SHEHashUpdate(&mut self, mut msg: &[u8]){
-        let mut n: usize= msg.len();
+    
+    fn SHE_Update(&mut self, mut msg: &[u8]){
+        let mut pn: usize; 
+        let mut n = msg.len();
         self.total += n;
-        let mut sum = 0;
-        if self.len!=0{
-            if 16-self.len < n{(self.truncate)= 16-self.len;}else{(self.truncate)=n;}
-            for i in 0..(self.truncate){
-                self.blk[i]= msg[i];
+        
+        if self.len != 0 {                
+            if 16-self.len < n{
+                pn = 16-self.len;
             }
-            self.len += (self.truncate);
-            sum= (self.truncate);
-            msg= &msg[sum..];
-            n -= (self.truncate);
-            if self.len == 16{
-                self.h = mp_comp(&(self.blk[..self.truncate]), self.h);
+            else{
+                pn = n;
+            }
+            
+            
+            for i in 0..pn{
+                self.blk[self.len + i] = msg[i];
+            }
+            
+            self.len += pn;
+            msg = &msg[pn..];
+            
+            n -= pn;
+            
+            if self.len == 16 { // blk is full, compress it
+                self.h= mp_comp(msg.to_vec(), n, self.h);
                 self.len= 0;
             }
         }
-        if n!=0{
-            self.h= mp_comp(msg, self.h);
-            (self.truncate) = n % 16; //n%16
-            sum = n - (self.truncate);
+
+        if n != 0 {
+            self.h= mp_comp(msg.to_vec(), n, self.h);
+            
+            pn = n & 0xf; //n%16
+            let sum = n - pn;
             msg = &msg[sum..];
-            self.len= (self.truncate);
-            for i in 0..(self.truncate){
+
+            self.len= pn;
+            for i in 0..pn{
                 self.blk[i]= msg[i];
             }
         }
+
     }
-    fn SHEHashFinal(&mut self)->GenericArray<u8, UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>>{
-        println!("{:#?}", &self.blk[..self.truncate]);
-        return mp_comp(&pad(&self.blk[..self.truncate], self.total), self.h);
+
+    fn SHE_Final(&mut self) -> GenericArray<u8, UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>>{
+        pad(self);
+        return mp_comp(self.blk.to_vec(), self.len , self.h)
     }
 }
 
@@ -69,145 +80,156 @@ fn hexout(var: &[u8]) -> String{
     for d in var {        
         let x = format!("{:02x}", d);        
         new_label.push_str(&x);    
-    }   
-    //println!("{:?}", new_label);       
-    return new_label;
+    }          
+    return new_label; //will display 5a}
 }
-fn mp_comp(mut m: &[u8], mut h: GenericArray<u8, UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>>) -> GenericArray<u8, UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>>{
-    let (mut j, mut b): (usize, usize) = (0, 1);
-    let mut ekm: GenericArray<u8, UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>> = GenericArray::default();
-    let mut cipher;  
-    while  b <= m.len()>>4 {
-        ekm.copy_from_slice(&m[((b-1)*16)..(b*16)]);
-        cipher= <Aes128 as cipher::KeyInit>::new(&h);
-        cipher.encrypt_block(&mut ekm);
-        for j in 0..16{
-            h[j] = h[j] ^ (ekm[j] ^ m[j+(16*(b-1))]);
-        }
-        b+=1;
-    }
-    return h;
-}
-fn pad(msg: &[u8], mut total: usize) -> Vec<u8> {
-    let n= msg.len();
-    if total == usize::MIN {total = n;}
-    let r = msg.len() & 0xf;
-    let z:usize;
-    if r <= 10{z = 10 - r;}else{z = 26 - r;}
-    let zero_vec: Vec<u8> = vec![0; z].to_owned();
-    let mut vec = Vec::new();
-    for iter in msg.to_owned(){vec.push(iter);}
-    for iter in *b"\x80"{vec.push(iter);}
-    for iter in zero_vec.to_owned(){vec.push(iter);}
-    let i = total * 8; 
-    for j in (0..5).rev(){vec.push(({i}>>({j}<<3) & 0xff).try_into().unwrap());}
-    println!("{:#?}", vec.len());
-    return vec;
-}
+
+//CMAC to encrypt the message block
 fn cmac1(key: &[u8], msg: &[u8]) -> GenericArray<u8, UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>>{
     let mut mac = Cmac::<Aes128>::new_from_slice(&key).unwrap();
-    cmac::Mac::update(&mut mac, &msg);
-    let result = cmac::Mac::finalize(mac);
+    mac.update(&msg);
+    let result = mac.finalize();
     let tag_bytes = result.into_bytes();
     return tag_bytes;
 }
 
-pub(crate) fn CryptHashInit(pctx: &mut profile_shc_t){
-    pctx.SHEHashInit();
-}
-pub(crate) fn CryptHashUpdate(pctx: &mut profile_shc_t, mut msg: &[u8]){
-    pctx.SHEHashUpdate(msg);
-}
-pub(crate) fn CryptHashFinal(pctx: &mut profile_shc_t)->GenericArray<u8, UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>>{
-    //pctx.SHEHashFinal(dig);
-    return pctx.SHEHashFinal();
-}
-fn CryptSelfTest(fulltest: bool)->bool{
-    let mut i: usize;
-    let key: Vec<u8>= vec![];
-    let key: Vec<u8>= vec![];
 
-    return true;
+fn mp_comp(m: Vec<u8>, len: usize, mut h: GenericArray<u8, UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>>) -> GenericArray<u8, UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>>{
+    let (mut b, mut m_count): (usize, usize) = (len>>4, 1);
+    let mut ekm = GenericArray::default();
+    let mut cipher;  
+    
+    while  b > 0 {
+        cipher= <Aes128 as cipher::KeyInit>::new(&h);
+        ekm.copy_from_slice(&m[((m_count-1)*16)..(m_count*16)]);
+        cipher::BlockEncrypt::encrypt_block(&cipher, &mut ekm);
+        for j in 0..16{
+            h[j] = h[j] ^ (ekm[j] ^ m[j + (16 * (m_count - 1))]);
+        }
+        b-=1;
+        m_count+=1;
+    }
+    // println!("{}",h.len());
+    return h;
 }
-pub(crate) fn CryptSign(key: &[u8], msg: &[u8]) -> GenericArray<u8, UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>>{
+
+
+fn pad(hctx: &mut she_hctx_t) {
+    let n= hctx.len;
+    if hctx.total == 0 {
+        hctx.total = n;
+    }
+    let r = n & 0xf;
+    let z:usize;
+    if r <= 10{
+        z = 10 - r;
+    }
+    else{
+        z = 26 - r;
+    }
+    hctx.blk[hctx.len] = 0x80;
+    hctx.len +=1;
+    for j in 0..z{
+        hctx.blk[hctx.len + j] = 0;
+    }
+    hctx.len += z;
+    let bits = hctx.total << 3;
+    for j in 0..5{
+        hctx.blk[hctx.len + (4-j)] = ({bits}>>({j}<<3) & 0xff).try_into().unwrap();
+    }
+    hctx.len += 5;
+}
+
+pub (crate) fn CryptSign(key: &[u8], msg: &[u8]) -> GenericArray<u8, UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>>{
     return cmac1(&key, &msg);
 }
-pub(crate) fn CryptVerify(key: &[u8],digest: &[u8], sig: GenericArray<u8, UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>>)  -> bool {
+
+pub (crate) fn CryptVerify(key: &[u8], digest: &[u8], sig: GenericArray<u8, UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>>)  -> bool {
     let new_sig = CryptSign(key, digest);
-    if new_sig == sig {return true;} return false;
+    if new_sig == sig {
+        return true;
+    }
+    return false;
 }
-pub(crate) fn CryptSkdf(parent: &[u8], label: char, ctx: &[u8])->GenericArray<u8, UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>>{
-    let mut hctx: she_hctx_t= she_hctx_t::default();
-    hctx.SHEHashInit();
-    hctx.SHEHashUpdate(parent);
-    hctx.SHEHashUpdate(b"\x01\x01");
-    //hctx.SHEHashUpdate(label);
-    hctx.SHEHashUpdate(ctx);
-    hctx.SHEHashUpdate(b"");
-    return hctx.SHEHashFinal();
+
+fn SHE_kdf(parent:&[u8], label:&[u8], ctx:&[u8]) -> Vec<u8> {
+    let pctx: &mut profile_shc_t= &mut profile_shc_t::default();
+    CryptHashInit(pctx);
+    CryptHashUpdate(pctx, parent);
+    CryptHashUpdate(pctx, b"\x01\x01");
+    CryptHashUpdate(pctx, label);
+    CryptHashUpdate(pctx, ctx);
+    CryptHashUpdate(pctx, b"\x00");
+    return CryptHashFinal(pctx).to_vec()
 }
+
+fn CryptSkdf(parent:&[u8], label:&[u8], ctx:&[u8]) -> Vec<u8>{
+    SHE_kdf(parent, label, ctx)
+}
+
+pub (crate) fn CryptXkdf( parent:&[u8], label:&[u8], ctx:&[u8]) -> Vec<u8>{
+    CryptSkdf(parent, label, ctx)
+}
+
+pub(crate) fn CryptHashInit(pctx: &mut profile_shc_t){
+    pctx.SHE_Init();
+}
+
+pub(crate) fn  CryptHashUpdate(pctx: &mut profile_shc_t, data: &[u8]){
+    pctx.SHE_Update(data);
+}
+
+pub(crate) fn CryptHashFinal(pctx: &mut profile_shc_t)-> GenericArray<u8, UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>>{
+    return pctx.SHE_Final(); 
+}
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-
     #[test]
-    fn hash_func(){
-        
-        //let she_hctx_t = she_hctx_t::hctx();
+    fn it_works() {
+        // CMAC1 test
+        println!("CMAC test");
+        let key = hex!(
+            "2b7e151628aed2a6abf7158809cf4f3c"
+        );
+        let msg = hex!(
+            "6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e51"
+        );
+        let results = cmac1(&key, &msg);
+        hexout(&results);
 
-        let  pshctx: &mut profile_shc_t= &mut profile_shc_t::default();
-        CryptHashInit(pshctx);
-        println!("{:#?}", pshctx.len);
-
-        //bytes.fromhex("6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e51")
-        let msg= hex!("6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e51");
-        println!("This is message: {:#?}", msg);
-        CryptHashUpdate(pshctx, &msg[0..4]);
-        println!("{:#?} <-[0..4]", pshctx.len);
-        CryptHashUpdate(pshctx, &msg[4..21]);
-        println!("{:#?} <-[4..21]", pshctx.len);
-        CryptHashUpdate(pshctx, &msg[21..32]);
-        println!("{:#?} <-[21..32]", pshctx.len);
-        println!("{:#?}", hexout(&CryptHashFinal(pshctx)[..]));
-
-        
-
-        //hcontext = CryptHashUpdate(hcontext, b"", n)
-    }
-
-    #[test]
-    fn try_it(){
-        let mut key: &GenericArray<u8, UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>>
-            = &GenericArray::clone_from_slice(b"AAAAAAAAAAAAAAAA"); 
-        let message= b"ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ";
-        println!("{:#?}", hexout(&mp_comp(message, *key)[..]));
-
-
-
-        println!("{}","\nCryptSign Function");
         //Test Vectors from Autosar SHE 
+        //CryptSign
+        println!("{}","\nCryptSign Function");
         let crypt_sign_result = CryptSign(b"+~\x15\x16(\xae\xd2\xa6\xab\xf7\x15\x88\t\xcfO<", b"k\xc1\xbe\xe2.@\x9f\x96\xe9=~\x11s\x93\x17*");
         println!("{}", hexout(&crypt_sign_result));
-
+        
+        //CryptVerify
         println!("{}","\nCryptVerify Function");
         let bool_check = CryptVerify(b"+~\x15\x16(\xae\xd2\xa6\xab\xf7\x15\x88\t\xcfO<", b"k\xc1\xbe\xe2.@\x9f\x96\xe9=~\x11s\x93\x17*", crypt_sign_result);
         println!("{}", bool_check);
-        
-        //2b7e151628aed2a6abf7158809cf4f3c    = key
-        //6bc1bee22e409f96e93d7e117393172a    = msg
 
-        //hex!("2b7e151628aed2a6abf7158809cf4f3c")
+        //Hash Sequence Test
+        println!("{}","\nHash Sequence Function");
+        let pshctx: &mut profile_shc_t= &mut profile_shc_t::default();
+        for i in 0..30{
+            CryptHashInit(pshctx);
+            let msg= b"Z".repeat(i);
+            CryptHashUpdate(pshctx, &msg);
+            let dig = CryptHashFinal(pshctx);
+            println!("{} {}", i, hexout(&dig));
+        }
 
-        //pad tests  
-        // for j in (0..20){     
-        let test = &pad(b"\xAB\xAB\xAB\xAB\xAB\xAB\xAB\xAB\xAB\xAB\xAB", usize::MIN)[..];
-        println!("{:?}", hexout(test));
+        //SHE_KDF test taken from https://github.com/TrustedComputingGroup/MARS/blob/fe892024c80baa50603fca4caea2b67eb43a29dc/emulator/python/hw_she.py
+        println!("{}","\nSHE_KDF Test");
+        let key = hex!("000102030405060708090a0b0c0d0e0f");
+        let exp = hex!("118a46447a770d87828a69c222e2d17e");
+        let out = CryptSkdf(&key, b"SHE", b"");
+        assert_eq!(out,exp);
+        println!("SKDF = {}",hexout(&out));
 
-        //let cmaced = cmac1(&<[u8; 16]>::from_hex("2b7e151628aed2a6abf7158809cf4f3c"), &<[u8; 16]>::from_hex("2b7e151628aed2a6abf7158809cf4f3c"));
-        println!("{:#?}", hex!("2b7e151628aed2a6abf7158809cf4f3c"));
-        //let (hctx, msg): (she_hctx_t, &[u8])= CryptHashUpdate(hctx, msg);
     }
 }
 /*END OF SHE*/
