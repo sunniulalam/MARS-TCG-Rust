@@ -4,7 +4,7 @@
 
 /*SHA2 import*/
 mod hw_sha2;
-use hw_sha2::{profile_shc_t, CryptHashInit, CryptHashUpdate, CryptHashFinal, CryptSign, CryptVerify, CryptXkdf};
+use hw_sha2::{profile_shc_t, CryptHashInit, CryptHashUpdate, CryptHashFinal, CryptSign, CryptVerify, CryptXkdf, CryptSelfTest};
 
 /*Ascon import*/
 //mod hw_ascon;
@@ -52,11 +52,22 @@ const MARS_RC_SEQ:      MARS_RC= 8;
 
 //IMPORTED VALUES      DO NOT KEEP
 //ADD IN HARDWARE CRYPT ALGORITHMS
-const PROFILE_COUNT_PCR:    u16= 4;
-const PROFILE_COUNT_TSR:    u16= 0;
+const PROFILE_COUNT_PCR:  usize= 4;
+const PROFILE_COUNT_TSR:  usize= 0;
 const PROFILE_LEN_DIGEST: usize= 32;
 const PROFILE_COUNT_REG:  usize= (PROFILE_COUNT_PCR as usize)+ (PROFILE_COUNT_TSR as usize); //?????
 const PROFILE_LEN_XKDF:   usize= 7;
+const PROFILE_LEN_SIGN:   usize= PROFILE_LEN_DIGEST;
+const PROFILE_LEN_KPUB:   usize= 0;
+const PROFILE_LEN_KPRV:   usize= 0;
+const PROFILE_ALG_HASH:   usize= 11;
+const PROFILE_ALG_SIGN:   usize= 5;
+const PROFILE_ALG_SKDF:   usize= 34;
+const PROFILE_ALG_AKDF:   usize= 0;
+
+
+
+
 
 const PROFILE_LEN_KSYM:   usize= PROFILE_LEN_DIGEST;
 
@@ -74,48 +85,159 @@ const MARS_LR:             [u8; 1]= *b"R";
 pub struct MARS{
     debug: bool,
     failure: bool,
-    REG: [GenericArray<u8, UInt<UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>, B0>>; PROFILE_COUNT_PCR as usize],
-    DP: [u8; PROFILE_LEN_KSYM],
-    PS: [u8; PROFILE_LEN_KSYM],
+    REG: [Vec<u8>; PROFILE_COUNT_PCR as usize],
+    DP: Vec<u8>,
+    PS: Vec<u8>,
     RC_CODE: MARS_RC,
+    pctx: profile_shc_t,
 }
 impl MARS{
     fn MARS_init(&mut self, 
         debug: bool){
         self.debug= debug;
         self.failure= false;
-        self.REG= [GenericArray::default(); PROFILE_COUNT_PCR as usize];
+        //self.REG= [; PROFILE_COUNT_PCR as usize];
         self.RC_CODE= 0;
         if PROFILE_LEN_KSYM==16{
             //self.PS= *b"A 16-byte secret";
         }else{
-            self.PS= *b"Here are thirty two secret bytes";
+            self.PS= (b"Here are thirty two secret bytes").to_vec();
         }
         let mut temp: GenericArray<u8, UInt<UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>, B0>>= GenericArray::default();
         if debug{
             temp= CryptXkdf(&self.PS, &MARS_LD[..], b"dbg");
-            for i in 0..PROFILE_LEN_KSYM{   self.DP[i]= temp[i];    }
+            for i in 0..PROFILE_LEN_KSYM{   
+                self.DP[i]= temp[i];    
+            }
 
         }else{
             temp= CryptXkdf(&self.PS, &MARS_LD[..], b"prd");
-            for i in 0..PROFILE_LEN_KSYM{   self.DP[i]= temp[i];    } 
+            for i in 0..PROFILE_LEN_KSYM{   
+                self.DP[i]= temp[i];    
+            } 
         }
     }
+    
     fn MARS_dump(&mut self){
         println!("--------------------------");
         println!("MARS PRIVATE CONFIGURATION");
         println!("{}", hexout(&self.PS));
         println!("{}", hexout(&self.DP));
-        for i in self.REG{
+        for i in &self.REG{
             println!("{}", hexout(&i));
         }
         println!("--------------------------");
     }
+    fn MARS_SelfTest(&mut self,
+            fullTest: bool
+        ) -> MARS_RC{
+        self.failure= self.failure || !CryptSelfTest(fullTest);
+        if self.failure{
+            return MARS_RC_FAILURE;
+        }else{
+            return MARS_RC_SUCCESS;
+        }
+    }
     
+    fn MARS_CapabilityGet(
+        &mut self,
+        pt: u16,
+        cap: &mut u16
+        )-> MARS_RC{
+        *cap = match pt{
+            MARS_PT_PCR         =>PROFILE_COUNT_PCR as u16,
+            MARS_PT_TSR         =>PROFILE_COUNT_TSR as u16,
+            MARS_PT_LEN_DIGEST  =>PROFILE_LEN_DIGEST as u16,
+            MARS_PT_LEN_SIGN    =>PROFILE_LEN_SIGN as u16,
+            MARS_PT_LEN_KSYM    =>PROFILE_LEN_KSYM as u16,
+            MARS_PT_LEN_KPUB    =>PROFILE_LEN_KPUB as u16,
+            MARS_PT_LEN_KPRV    =>PROFILE_LEN_KPRV as u16,
+            MARS_PT_ALG_HASH    =>PROFILE_ALG_HASH as u16,
+            MARS_PT_ALG_SIGN    =>PROFILE_ALG_SIGN as u16,
+            MARS_PT_ALG_SKDF    =>PROFILE_ALG_SKDF as u16,
+            MARS_PT_ALG_AKDF    =>PROFILE_ALG_AKDF as u16,
+            _=>return MARS_RC_VALUE,
+        };
+        return MARS_RC_SUCCESS;
+    }
+
+    fn MARS_SequenceHash(&mut self) -> MARS_RC{
+        if self.failure {
+            return MARS_RC_FAILURE;
+        }
+        CryptHashInit(&mut self.pctx);
+        return MARS_RC_SUCCESS;
+    }
+
+    fn MARS_SequenceUpdate(&mut self, inVal: &[u8], out: &[u8]) -> MARS_RC{
+        if self.failure {
+            return MARS_RC_FAILURE;
+        }
+        if inVal.len()==0 || out.len() == 0 {
+            return MARS_RC_BUFFER;
+        }
+        CryptHashUpdate(&mut self.pctx, inVal);
+        return MARS_RC_SUCCESS;
+    }
+    
+    fn MARS_SequenceComplete(&mut self, out: &mut Vec<u8>) -> MARS_RC{
+        if self.failure {
+            return MARS_RC_FAILURE;
+        }
+        if (out.len()==0 || (&out.len() < &PROFILE_LEN_DIGEST)){
+            return MARS_RC_BUFFER;
+        }
+        *out= CryptHashFinal(&mut self.pctx).to_vec();
+        return MARS_RC_SUCCESS;
+    }
+
+    fn MARS_Derive(&mut self, 
+        regSelect: u32, 
+        ctx: &[u8], 
+        out: &mut Vec<u8>
+        ) -> MARS_RC{
+
+        if self.failure{
+            return MARS_RC_FAILURE;
+        }
+        if regSelect>>PROFILE_COUNT_REG==0{
+            return MARS_RC_REG;
+        }
+        if out.len()==0 || ctx.len()==0{
+            return MARS_RC_BUFFER;
+        }
+        let snapshot= self.CryptSnapshot(regSelect, ctx);
+        *out= CryptXkdf(&self.DP, &MARS_LX, &snapshot).to_vec();
+        return MARS_RC_SUCCESS;
+    }
+    fn MARS_DpDerive(&mut self,
+        regSelect: u32,
+        ctx: &[u8],
+        ) -> MARS_RC{
+            if self.failure{
+                return MARS_RC_FAILURE;
+            }
+            if regSelect>>PROFILE_COUNT_REG==0{
+                return MARS_RC_REG;
+            }
+            if ctx.len()==0{
+                return MARS_RC_BUFFER;
+            }
+            if ctx.len()!=0{
+                let snapshot= self.CryptSnapshot(regSelect, ctx);
+                let temp= CryptXkdf(&self.DP, &MARS_LD, &snapshot);
+                for i in 0..PROFILE_LEN_KSYM{   
+                    self.DP[i]= temp[i];    
+                }
+            }
+                
+
+            return MARS_RC_SUCCESS;
+    }
     fn CryptSnapshot(&mut self, 
         regSelect: u32, 
         ctx: &[u8]
-        ) -> GenericArray<u8, UInt<UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>, B0>>{
+        ) -> Vec<u8>{
         
         let pctx: &mut profile_shc_t= &mut profile_shc_t::default();
         
@@ -127,7 +249,7 @@ impl MARS{
             }
         }
         CryptHashUpdate(pctx, ctx);
-        return CryptHashFinal(pctx);
+        return CryptHashFinal(pctx).to_vec();
     }
     
     fn MARS_PcrExtend(&mut self, 
@@ -137,7 +259,7 @@ impl MARS{
         if self.failure {
             return MARS_RC_FAILURE; //0
         }  
-        if pcrIndex >= PROFILE_COUNT_PCR{
+        if pcrIndex >= PROFILE_COUNT_PCR as u16{
             return MARS_RC_REG; //7
         }
         if dig.len()==0{
@@ -181,8 +303,8 @@ impl MARS{
         if regIndex >= PROFILE_COUNT_REG { return MARS_RC_REG; }
         if dig.len()==0 {   return MARS_RC_BUFFER;   }
         let mut i=0;
-        for j in self.REG[regIndex]{
-            dig[i]= j;
+        for j in &self.REG[regIndex]{
+            dig[i]= *j;
             i+=1;
         }
         return MARS_RC_SUCCESS;
